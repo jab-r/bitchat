@@ -6,7 +6,11 @@
 	<true/>
 	<key>com.apple.security.application-groups</key>
 	<array>
-		<string>group.chat.bitchat</string>
+		<string>group.com.loxation.app</string>
+	</array>
+	<key>keychain-access-groups</key>
+	<array>
+		<string>$(AppIdentifierPrefix)com.jabresearch.loxation</string>
 	</array>
 </dict>
 </plist>

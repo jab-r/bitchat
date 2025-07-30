@@ -8,6 +8,7 @@
 
 import SwiftUI
 import UserNotifications
+import SwiftMLS
 
 @main
 struct BitchatApp: App {
@@ -20,6 +21,15 @@ struct BitchatApp: App {
     
     init() {
         UNUserNotificationCenter.current().delegate = NotificationDelegate.shared
+        Task {
+            do {
+                // Initialize MLS client and make it available to the encryption service
+                let mlsClient = try MLSClient()
+                await MLSEncryptionService.shared.initialize(mlsClient: mlsClient)
+            } catch {
+                print("Failed to initialize MLS: \(error)")
+            }
+        }
     }
     
     var body: some Scene {

@@ -169,7 +169,7 @@ class NoiseSession {
     
     func encrypt(_ plaintext: Data) throws -> Data {
         return try sessionQueue.sync(flags: .barrier) {
-            guard case .established = state, let cipher = sendCipher else {
+            guard case .established = state, let cipher: NoiseCipherState = sendCipher else {
                 throw NoiseSessionError.notEstablished
             }
             

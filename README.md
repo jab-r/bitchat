@@ -1,14 +1,15 @@
-<img height="300" alt="bitchat" src="https://github.com/user-attachments/assets/2660f828-49c7-444d-beca-d8b01854667a" />
+<img width="256" height="256" alt="icon_128x128@2x" src="https://github.com/user-attachments/assets/90133f83-b4f6-41c6-aab9-25d0859d2a47" />
 
 ## bitchat
 
 A decentralized peer-to-peer messaging app that works over Bluetooth mesh networks. No internet required, no servers, no phone numbers. It's the side-groupchat. 
 
 [bitchat.free](http://bitchat.free)
+
 📲 [App Store](https://apps.apple.com/us/app/bitchat-mesh/id6748219622)
 
 > [!WARNING]
-> Private message and channel features have not received external security review and may contain vulnerabilities. Do not use for sensitive use cases, and do not rely on its security until it has been reviewed. Now uses the [Noise Protocol](http://www.noiseprotocol.org) for identity and encryption. Public local chat (the main feature) has no security concerns. 
+> Private messages have not received external security review and may contain vulnerabilities. Do not use for sensitive use cases, and do not rely on its security until it has been reviewed. Now uses the [Noise Protocol](http://www.noiseprotocol.org) for identity and encryption. Public local chat (the main feature) has no security concerns. 
 
 
 ## License
@@ -29,7 +30,7 @@ This project is released into the public domain. See the [LICENSE](LICENSE) file
 - **Performance Optimizations**: LZ4 message compression, adaptive battery modes, and optimized networking
 
 
-## Technical Architecture
+## [Technical Architecture](https://deepwiki.com/permissionlesstech/bitchat)
 
 ### Binary Protocol
 bitchat uses an efficient binary protocol optimized for Bluetooth LE:

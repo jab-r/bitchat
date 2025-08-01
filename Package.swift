@@ -15,13 +15,15 @@ let package = Package(
         ),
     ],
     dependencies: [
-        .package(path: "../react-native-mls/SwiftMLS")
+        .package(path: "../react-native-mls/SwiftMLS"),
+        .package(url: "https://github.com/21-DOT-DEV/swift-secp256k1", from: "0.21.1"),
     ],
     targets: [
         .executableTarget(
             name: "bitchat",
             dependencies: [
-                .product(name: "SwiftMLS", package: "SwiftMLS")
+                .product(name: "SwiftMLS", package: "SwiftMLS"),
+                .product(name: "P256K", package: "swift-secp256k1")
             ],
             path: "bitchat",
             exclude: [

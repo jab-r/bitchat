@@ -351,6 +351,7 @@ class BluetoothMeshService: NSObject {
         .versionHello: 10.0,          // Suppress version hellos for 10 seconds
         .versionAck: 10.0,            // Suppress version acks for 10 seconds
         .noiseIdentityAnnounce: 5.0,  // Suppress noise identity announcements for 5 seconds
+        .loxationAnnounce: 5.0,       // Suppress loxation announcements for 5 seconds
         .leave: 1.0                   // Suppress leave messages for 1 second
     ]
     
@@ -1423,6 +1424,10 @@ class BluetoothMeshService: NSObject {
             // Send identity announcement with new peer ID
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
                 self?.sendNoiseIdentityAnnounce()
+            }
+            // Send identity announcement with new peer ID
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.55) { [weak self] in
+                self?.sendLoxationAnnounce()
             }
             
             // Schedule next rotation
@@ -3094,6 +3099,14 @@ class BluetoothMeshService: NSObject {
                 messageTypeName = "SYSTEM_VALIDATION"
             case .handshakeRequest:
                 messageTypeName = "HANDSHAKE_REQUEST"
+            case .loxationAnnounce:
+                messageTypeName = "LOXATION_ANNOUNCE"
+            case .keyPackageStart:
+                messageTypeName = "KEY_PACKAGE_START"
+            case .keyPackageContinue:
+                messageTypeName = "KEY_PACKAGE_CONTINUE"
+            case .keyPackageEnd:
+                messageTypeName = "KEY_PACKAGE_END"
             default:
                 messageTypeName = "UNKNOWN(\(packet.type))"
             }
@@ -3106,6 +3119,7 @@ class BluetoothMeshService: NSObject {
                                 MessageType.noiseHandshakeInit.rawValue,
                                 MessageType.noiseHandshakeResp.rawValue,
                                 MessageType.noiseIdentityAnnounce.rawValue,
+                                MessageType.loxationAnnounce.rawValue,
                                 MessageType.leave.rawValue].contains(packet.type)
             
             
@@ -7268,7 +7282,81 @@ extension BluetoothMeshService: CBPeripheralManagerDelegate {
             broadcastPacket(packet)
         }
     }
-    
+    private func sendLoxationAnnounce(to specificPeerID: String? = nil) {
+        // Rate limit location announcements
+        let now = Date()
+        
+        // If targeting a specific peer, check rate limit
+        if let peerID = specificPeerID {
+            if let lastTime = lastIdentityAnnounceTimes[peerID],
+               now.timeIntervalSince(lastTime) < identityAnnounceMinInterval {
+                // Too soon, skip this announcement
+                return
+            }
+            lastIdentityAnnounceTimes[peerID] = now
+        } else {
+            // Broadcasting to all - check global rate limit
+            if let lastTime = lastIdentityAnnounceTimes["*broadcast*"],
+               now.timeIntervalSince(lastTime) < identityAnnounceMinInterval {
+                return
+            }
+            lastIdentityAnnounceTimes["*broadcast*"] = now
+        }
+        
+        // Get our Noise static public key and signing public key
+        let staticKey = noiseService.getStaticPublicKeyData()
+        let signingKey = noiseService.getSigningPublicKeyData()
+        
+        // Get nickname from delegate
+        let nickname = (delegate as? ChatViewModel)?.nickname ?? "Anonymous"
+        
+        // Create the binding data to sign (peerID + publicKey + timestamp)
+        let timestampData = String(Int64(now.timeIntervalSince1970 * 1000)).data(using: .utf8)!
+        let bindingData = myPeerID.data(using: .utf8)! + staticKey + timestampData
+        
+        // Sign the binding with our Ed25519 signing key
+        let signature = noiseService.signData(bindingData) ?? Data()
+        
+        // Create the identity announcement
+        let announcement = LoxationAnnouncement(
+            peerID: myPeerID,
+            devicdeId: deviceId,
+            nickname: nickname,
+            timestamp: now,
+            previousPeerID: nil,
+            signature: signature
+        )
+        
+        // Encode the announcement
+        let announcementData = announcement.toBinaryData()
+        
+        let packet = BitchatPacket(
+            type: MessageType.loxationAnnounce.rawValue,
+            senderID: Data(hexString: myPeerID) ?? Data(),
+            recipientID: specificPeerID.flatMap { Data(hexString: $0) },  // Targeted or broadcast
+            timestamp: UInt64(Date().timeIntervalSince1970 * 1000),
+            payload: announcementData,
+            signature: nil,
+            ttl: adaptiveTTL        )
+        
+        if let targetPeer = specificPeerID {
+            SecureLogger.log("Sending targeted loxation announce to \(targetPeer)", 
+                           category: SecureLogger.noise, level: .info)
+            
+            // Try direct delivery for targeted announces
+            if !sendDirectToRecipient(packet, recipientPeerID: targetPeer) {
+                // Fall back to selective relay if direct delivery fails
+                SecureLogger.log("Recipient \(targetPeer) not directly connected for loxation announce, using relay", 
+                               category: SecureLogger.session, level: .info)
+                sendViaSelectiveRelay(packet, recipientPeerID: targetPeer)
+            }
+        } else {
+            SecureLogger.log("Broadcasting loxation announce to all peers", 
+                           category: SecureLogger.noise, level: .info)
+            broadcastPacket(packet)
+        }
+    }
+
     // Removed sendPacket method - all packets should use broadcastPacket to ensure mesh delivery
     
     // Send private message using Noise Protocol

@@ -9,14 +9,11 @@ options:
 settings:
   MARKETING_VERSION: 1.0.0
   CURRENT_PROJECT_VERSION: 1
-
+  
 packages:
-  P256K:
-    url: https://github.com/21-DOT-DEV/swift-secp256k1
-    majorVersion: 0.21.1
   MLS:
     path: MLSBinary
-  
+
 targets:
   bitchat_iOS:
     type: application
@@ -69,8 +66,8 @@ targets:
     dependencies:
       - target: bitchatShareExtension
         embed: true
-      - package: P256K
-      - package: MLS
+      - product: MLS
+        package: MLS
         
   bitchat_macOS:
     type: application
@@ -113,10 +110,11 @@ targets:
       ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
       ASSETCATALOG_COMPILER_INCLUDE_ALL_APPICON_ASSETS: YES
       CODE_SIGN_ENTITLEMENTS: bitchat/bitchat-macOS.entitlements
-    dependencies:
-      - package: P256K
-      - package: MLS
 
+    dependencies:
+      - product: MLS
+        package: MLS
+        
   bitchatShareExtension:
     type: app-extension
     platform: iOS

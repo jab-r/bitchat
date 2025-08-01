@@ -165,7 +165,12 @@ enum MessageType: UInt8 {
     // Favorite system messages
     case favorited = 0x30               // Peer favorited us
     case unfavorited = 0x31             // Peer unfavorited us
-    
+    // loxation messages
+    case loxationAnnounce = 0x40        // Device ID announcement for location sharing
+    case keyPackageStart = 0x41         // Key package for MLS group management
+    case keyPackageContinue = 0x42      // Continuation of key package transmission
+    case keyPackageEnd = 0x43           // End of key package transmission
+
     var description: String {
         switch self {
         case .announce: return "announce"
@@ -189,6 +194,10 @@ enum MessageType: UInt8 {
         case .handshakeRequest: return "handshakeRequest"
         case .favorited: return "favorited"
         case .unfavorited: return "unfavorited"
+        case .loxationAnnounce: return "loxationAnnounce"
+        case .keyPackageStart: return "keyPackageStart"
+        case .keyPackageContinue: return "keyPackageContinue"
+        case .keyPackageEnd: return "keyPackageEnd"
         }
     }
 }

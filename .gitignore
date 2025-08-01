@@ -65,3 +65,5 @@ __pycache__/
 # Large binary files that shouldn't be in git
 MLSBinary/MLS.xcframework/*/libreact_native_mls_rust.a
 MLSBinary/MLS.xcframework/*/Headers/libs/*.a
+MLSBinary/.build/
+MLSBinary/.swiftpm/

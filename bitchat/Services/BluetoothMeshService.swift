@@ -7310,9 +7310,12 @@ extension BluetoothMeshService: CBPeripheralManagerDelegate {
         // Get nickname from delegate
         let nickname = (delegate as? ChatViewModel)?.nickname ?? "Anonymous"
         
-        // Create the binding data to sign (peerID + publicKey + timestamp)
+        // Get stable device identifier
+        let deviceId = getDeviceIdentifier()
+        
+        // Create the binding data to sign (peerID + deviceId + timestamp)
         let timestampData = String(Int64(now.timeIntervalSince1970 * 1000)).data(using: .utf8)!
-        let bindingData = myPeerID.data(using: .utf8)! + staticKey + timestampData
+        let bindingData = myPeerID.data(using: .utf8)! + deviceId.data(using: .utf8)! + timestampData
         
         // Sign the binding with our Ed25519 signing key
         let signature = noiseService.signData(bindingData) ?? Data()
@@ -7320,10 +7323,8 @@ extension BluetoothMeshService: CBPeripheralManagerDelegate {
         // Create the identity announcement
         let announcement = LoxationAnnouncement(
             peerID: myPeerID,
-            devicdeId: deviceId,
-            nickname: nickname,
+            deviceId: deviceId,
             timestamp: now,
-            previousPeerID: nil,
             signature: signature
         )
         

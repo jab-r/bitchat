@@ -832,8 +832,68 @@ struct NoiseIdentityAnnouncement: Codable {
         
         return data
     }
+}
+struct LoxationAnnouncement: Codable {
+    let peerID: String               // Current ephemeral peer ID
+    let deviceId: String             // Unique device identifier
+    let timestamp: Date              // When this binding was created
+    let signature: Data              // Signature proving ownership
     
-    static func fromBinaryData(_ data: Data) -> NoiseIdentityAnnouncement? {
+    init(peerID: String, deviceId: String, timestamp: Date, signature: Data) {
+        self.peerID = peerID
+        self.deviceId = deviceId
+        self.timestamp = timestamp
+        self.signature = signature
+    }
+    
+    // Custom decoder to ensure nickname is trimmed
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.peerID = try container.decode(String.self, forKey: .peerID)
+        self.deviceId = try container.decode(String.self, forKey: .deviceId)
+        self.timestamp = try container.decode(Date.self, forKey: .timestamp)
+        self.signature = try container.decode(Data.self, forKey: .signature)
+    }
+    
+    func encode() -> Data? {
+        return try? JSONEncoder().encode(self)
+    }
+    
+    static func decode(from data: Data) -> LoxationAnnouncement? {
+        return try? JSONDecoder().decode(LoxationAnnouncement.self, from: data)
+    }
+    
+    // MARK: - Binary Encoding
+    
+    func toBinaryData() -> Data {
+        var data = Data()
+        
+        // Flags byte: bit 0 = hasPreviousPeerID
+        var flags: UInt8 = 0
+        data.appendUInt8(flags)
+        
+        // PeerID as 8-byte hex string
+        var peerData = Data()
+        var tempID = peerID
+        while tempID.count >= 2 && peerData.count < 8 {
+            let hexByte = String(tempID.prefix(2))
+            if let byte = UInt8(hexByte, radix: 16) {
+                peerData.append(byte)
+            }
+            tempID = String(tempID.dropFirst(2))
+        }
+        while peerData.count < 8 {
+            peerData.append(0)
+        }
+        data.append(peerData)
+        data.appendString(deviceId)
+        data.appendDate(timestamp)
+        data.appendData(signature)
+        
+        return data
+    }
+
+    static func fromBinaryData(_ data: Data) -> LoxationAnnouncement? {
         // Create defensive copy
         let dataCopy = Data(data)
         
@@ -843,36 +903,21 @@ struct NoiseIdentityAnnouncement: Codable {
         var offset = 0
         
         guard let flags = dataCopy.readUInt8(at: &offset) else { return nil }
-        let hasPreviousPeerID = (flags & 0x01) != 0
         
         // Read peerID using safe method
         guard let peerIDBytes = dataCopy.readFixedBytes(at: &offset, count: 8) else { return nil }
         let peerID = peerIDBytes.hexEncodedString()
         
-        guard let publicKey = dataCopy.readData(at: &offset),
-              let signingPublicKey = dataCopy.readData(at: &offset),
-              let rawNickname = dataCopy.readString(at: &offset),
+        guard let deviceId = dataCopy.readString(at: &offset),
               let timestamp = dataCopy.readDate(at: &offset) else { return nil }
-        
-        // Trim whitespace from nickname
-        let nickname = rawNickname.trimmingCharacters(in: .whitespacesAndNewlines)
-        
-        var previousPeerID: String? = nil
-        if hasPreviousPeerID {
-            // Read previousPeerID using safe method
-            guard let prevIDBytes = dataCopy.readFixedBytes(at: &offset, count: 8) else { return nil }
-            previousPeerID = prevIDBytes.hexEncodedString()
-        }
+
         
         guard let signature = dataCopy.readData(at: &offset) else { return nil }
-        
-        return NoiseIdentityAnnouncement(peerID: peerID,
-                                        publicKey: publicKey,
-                                        signingPublicKey: signingPublicKey,
-                                        nickname: nickname,
-                                        timestamp: timestamp,
-                                        previousPeerID: previousPeerID,
-                                        signature: signature)
+
+        return LoxationAnnouncement( peerID: peerID,
+                                     deviceId: deviceId,
+                                     timestamp: timestamp,
+                                     signature: signature)
     }
 }
 

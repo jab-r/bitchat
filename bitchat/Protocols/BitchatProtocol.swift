@@ -881,45 +881,81 @@ struct NoiseIdentityAnnouncement: Codable {
     }
 }
 struct LoxationAnnouncement: Codable {
-    let peerID: String               // Current ephemeral peer ID
+    // Core fields
+    let peerID: String               // Current ephemeral peer ID (8 bytes in binary)
     let deviceId: String             // Unique device identifier
     let timestamp: Date              // When this binding was created
     let signature: Data              // Signature proving ownership
-    
-    init(peerID: String, deviceId: String, timestamp: Date, signature: Data) {
+
+    // Extended optional fields (binary v2+)
+    let version: UInt8?              // Binary format version (if present)
+    let locationId: String?          // Optional coarse location identifier
+    let uwbToken: String?            // Optional base64 UWB discovery token
+
+    init(peerID: String,
+         deviceId: String,
+         timestamp: Date,
+         signature: Data,
+         version: UInt8? = nil,
+         locationId: String? = nil,
+         uwbToken: String? = nil) {
         self.peerID = peerID
         self.deviceId = deviceId
         self.timestamp = timestamp
         self.signature = signature
+        self.version = version
+        self.locationId = locationId
+        self.uwbToken = uwbToken
     }
-    
-    // Custom decoder to ensure nickname is trimmed
+
+    // JSON codec
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         self.peerID = try container.decode(String.self, forKey: .peerID)
         self.deviceId = try container.decode(String.self, forKey: .deviceId)
         self.timestamp = try container.decode(Date.self, forKey: .timestamp)
         self.signature = try container.decode(Data.self, forKey: .signature)
+        self.version = try container.decodeIfPresent(UInt8.self, forKey: .version)
+        self.locationId = try container.decodeIfPresent(String.self, forKey: .locationId)
+        self.uwbToken = try container.decodeIfPresent(String.self, forKey: .uwbToken)
     }
-    
+
     func encode() -> Data? {
         return try? JSONEncoder().encode(self)
     }
-    
+
     static func decode(from data: Data) -> LoxationAnnouncement? {
         return try? JSONDecoder().decode(LoxationAnnouncement.self, from: data)
     }
-    
-    // MARK: - Binary Encoding
-    
+
+    // MARK: - Binary Encoding (v1-compatible, v2 extended)
+    // Layout:
+    // v1:
+    //  [flags:1] [peerID:8] [deviceId:String] [timestamp:Date] [signature:Data]
+    // v2:
+    //  [flags:1 bit0..2 optional presence][peerID:8][version:1][deviceId:String][timestamp:Date][signature:Data]
+    //  [if flags bit0 set][locationId:String]
+    //  [if flags bit1 set][uwbToken:String]
+    // Notes:
+    // - We always include version when any optional fields are present.
+    // - For pure v1 payload, version is omitted and flags is 0.
+    // - Strings/Data use existing appendString/appendData helpers (length-prefixed).
     func toBinaryData() -> Data {
         var data = Data()
-        
-        // Flags byte: bit 0 = hasPreviousPeerID
+
+        // Compute flags
         var flags: UInt8 = 0
+        let includeLocation = (locationId?.isEmpty == false)
+        let includeUwb = (uwbToken?.isEmpty == false)
+        let includeV2 = includeLocation || includeUwb || (version ?? 0) >= 2
+
+        if includeLocation { flags |= 0b0000_0001 }
+        if includeUwb { flags |= 0b0000_0010 }
+        if includeV2 { flags |= 0b1000_0000 } // bit7 indicates v2+ header present
+
         data.appendUInt8(flags)
-        
-        // PeerID as 8-byte hex string
+
+        // PeerID (8 bytes from hex)
         var peerData = Data()
         var tempID = peerID
         while tempID.count >= 2 && peerData.count < 8 {
@@ -933,38 +969,72 @@ struct LoxationAnnouncement: Codable {
             peerData.append(0)
         }
         data.append(peerData)
+
+        // If v2, write version byte (>=2). Default to 2 if unspecified but v2 is in use.
+        if includeV2 {
+            let ver: UInt8 = max(version ?? 2, 2)
+            data.appendUInt8(ver)
+        }
+
+        // Mandatory fields
         data.appendString(deviceId)
         data.appendDate(timestamp)
         data.appendData(signature)
-        
+
+        // Optional fields (only if flags set)
+        if includeLocation, let loc = locationId {
+            data.appendString(loc)
+        }
+        if includeUwb, let uwb = uwbToken {
+            data.appendString(uwb)
+        }
+
         return data
     }
 
     static func fromBinaryData(_ data: Data) -> LoxationAnnouncement? {
-        // Create defensive copy
         let dataCopy = Data(data)
-        
-        // Minimum size check: flags(1) + peerID(8) + min data lengths
-        guard dataCopy.count >= 20 else { return nil }
-        
+        guard dataCopy.count >= 20 else { return nil } // minimal sanity check
+
         var offset = 0
-        
+
         guard let flags = dataCopy.readUInt8(at: &offset) else { return nil }
-        
-        // Read peerID using safe method
+
+        // PeerID
         guard let peerIDBytes = dataCopy.readFixedBytes(at: &offset, count: 8) else { return nil }
         let peerID = peerIDBytes.hexEncodedString()
-        
+
+        let isV2 = (flags & 0b1000_0000) != 0
+
+        var version: UInt8? = nil
+        if isV2 {
+            guard let ver = dataCopy.readUInt8(at: &offset) else { return nil }
+            // We currently accept ver >= 2
+            guard ver >= 2 else { return nil }
+            version = ver
+        }
+
         guard let deviceId = dataCopy.readString(at: &offset),
-              let timestamp = dataCopy.readDate(at: &offset) else { return nil }
+              let timestamp = dataCopy.readDate(at: &offset),
+              let signature = dataCopy.readData(at: &offset) else { return nil }
 
-        
-        guard let signature = dataCopy.readData(at: &offset) else { return nil }
+        var locationId: String? = nil
+        var uwbToken: String? = nil
 
-        return LoxationAnnouncement( peerID: peerID,
-                                     deviceId: deviceId,
-                                     timestamp: timestamp,
-                                     signature: signature)
+        if (flags & 0b0000_0001) != 0 {
+            locationId = dataCopy.readString(at: &offset)
+        }
+        if (flags & 0b0000_0010) != 0 {
+            uwbToken = dataCopy.readString(at: &offset)
+        }
+
+        return LoxationAnnouncement(peerID: peerID,
+                                    deviceId: deviceId,
+                                    timestamp: timestamp,
+                                    signature: signature,
+                                    version: version,
+                                    locationId: locationId,
+                                    uwbToken: uwbToken)
     }
 }
 

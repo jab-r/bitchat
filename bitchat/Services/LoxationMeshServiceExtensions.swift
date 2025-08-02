@@ -542,6 +542,114 @@ extension BluetoothMeshService {
         }
         return try? decoder.decode(LoxationChunk.self, from: data)
     }
+    // Local announce rate-limiter to avoid touching private core members
+    private struct LoxAnnounceRateLimiter {
+        static var lastTimes: [String: Date] = [:]
+        static let minInterval: TimeInterval = 10.0
+        static func shouldAllow(key: String, now: Date = Date()) -> Bool {
+            if let last = lastTimes[key], now.timeIntervalSince(last) < minInterval { return false }
+            lastTimes[key] = now
+            return true
+        }
+    }
+
+    // MARK: - Device Identification
+    
+    /// Gets a stable device identifier that persists across app launches
+    /// On iOS: Uses UIDevice.identifierForVendor with keychain fallback
+    /// On macOS: Generates and stores a UUID in keychain
+    private func getDeviceIdentifier() -> String {
+        let keychainKey = "deviceIdentifier"
+        
+        #if os(iOS)
+        // On iOS, prefer UIDevice.identifierForVendor
+        if let vendorId = UIDevice.current.identifierForVendor?.uuidString {
+            // Store in keychain for consistency and fallback
+            _ = KeychainManager.shared.saveIdentityKey(vendorId.data(using: .utf8) ?? Data(), forKey: keychainKey)
+            return vendorId
+        }
+        #endif
+        
+        // Try to retrieve existing device ID from keychain
+        if let existingData = KeychainManager.shared.getIdentityKey(forKey: keychainKey),
+           let existingId = String(data: existingData, encoding: .utf8) {
+            LoxLogInfo("Retrieved existing device identifier from keychain")
+            return existingId
+        }
+        
+        // Generate new device ID and store in keychain
+        let newDeviceId = UUID().uuidString
+        if KeychainManager.shared.saveIdentityKey(newDeviceId.data(using: .utf8) ?? Data(), forKey: keychainKey) {
+            LoxLogInfo("Generated and stored new device identifier")
+        } else {
+            LoxLogWarn("Failed to store device identifier in keychain")
+        }
+        
+        return newDeviceId
+    }
+
+
+    // Exposed so BluetoothMeshService can invoke from lifecycle events
+    func sendLoxationAnnounce(to specificPeerID: String? = nil) {
+        let now = Date()
+
+        // Rate limit: per-target key or broadcast key
+        let rateKey = specificPeerID ?? "*broadcast*"
+        guard LoxAnnounceRateLimiter.shouldAllow(key: rateKey, now: now) else {
+            return
+        }
+
+        // Build binding data: peerID + deviceId + timestamp(ms)
+        let deviceId = getDeviceIdentifier()
+        let timestampData = String(Int64(now.timeIntervalSince1970 * 1000)).data(using: .utf8) ?? Data()
+        let bindingData = (self.myPeerID.data(using: .utf8) ?? Data()) + (deviceId.data(using: .utf8) ?? Data()) + timestampData
+
+        // Sign with Noise signing key via service accessor
+        let noise = self.getNoiseService()
+        let signature = noise.signData(bindingData) ?? Data()
+
+        // Optional fields from local profile (do not log contents)
+        var locationIdOpt: String? = nil
+        var uwbTokenOpt: String? = nil
+        if let selfProfile = LoxationManagers.shared.profileManager.getProfile(for: self.myPeerID) {
+            locationIdOpt = selfProfile.locationId
+            uwbTokenOpt = selfProfile.uwbToken
+        }
+
+        // Build announcement (v2 when optional fields present)
+        let announcement = LoxationAnnouncement(
+            peerID: self.myPeerID,
+            deviceId: deviceId,
+            timestamp: now,
+            signature: signature,
+            version: 2,
+            locationId: locationIdOpt,
+            uwbToken: uwbTokenOpt
+        )
+
+        // Serialize to binary
+        let announcementData = announcement.toBinaryData()
+
+        let packet = BitchatPacket(
+            type: MessageType.loxationAnnounce.rawValue,
+            senderID: Data(hexString: self.myPeerID) ?? Data(),
+            recipientID: specificPeerID.flatMap { Data(hexString: $0) },
+            timestamp: UInt64(Date().timeIntervalSince1970 * 1000),
+            payload: announcementData,
+            signature: nil,
+            ttl: self.lox_adaptiveTTL
+        )
+
+        if let targetPeer = specificPeerID {
+            LoxLogInfo("Sending targeted loxation announce")
+            // Use shims to avoid private access
+            self.lox_sendTargeted(packet, to: targetPeer)
+        } else {
+            LoxLogInfo("Broadcasting loxation announce")
+            self.loxationBroadcast(packet)
+        }
+    }
+
 }
 
 

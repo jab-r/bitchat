@@ -1626,6 +1626,9 @@ class BluetoothMeshService: NSObject {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
                 self?.sendAnnouncementToPeer(peerID)
             }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { [weak self] in
+            self?.sendLoxationAnnounce()
+        }
         }
         
         // Register for app termination notifications
@@ -1790,6 +1793,10 @@ class BluetoothMeshService: NSObject {
         // Send initial announces after services are ready
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [weak self] in
             self?.sendBroadcastAnnounce()
+        }
+        // Send initial loxation announces after services are ready
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { [weak self] in
+            self?.sendLoxationAnnounce()
         }
         
         // Setup battery optimizer
@@ -5353,45 +5360,7 @@ extension BluetoothMeshService: CBPeripheralManagerDelegate {
         // Generate random delay between min and max for timing obfuscation
         return TimeInterval.random(in: minMessageDelay...maxMessageDelay)
     }
-    
-    // MARK: - Device Identification
-    
-    /// Gets a stable device identifier that persists across app launches
-    /// On iOS: Uses UIDevice.identifierForVendor with keychain fallback
-    /// On macOS: Generates and stores a UUID in keychain
-    private func getDeviceIdentifier() -> String {
-        let keychainKey = "deviceIdentifier"
         
-        #if os(iOS)
-        // On iOS, prefer UIDevice.identifierForVendor
-        if let vendorId = UIDevice.current.identifierForVendor?.uuidString {
-            // Store in keychain for consistency and fallback
-            _ = KeychainManager.shared.saveIdentityKey(vendorId.data(using: .utf8) ?? Data(), forKey: keychainKey)
-            return vendorId
-        }
-        #endif
-        
-        // Try to retrieve existing device ID from keychain
-        if let existingData = KeychainManager.shared.getIdentityKey(forKey: keychainKey),
-           let existingId = String(data: existingData, encoding: .utf8) {
-            SecureLogger.log("Retrieved existing device identifier from keychain", 
-                           category: SecureLogger.security, level: .info)
-            return existingId
-        }
-        
-        // Generate new device ID and store in keychain
-        let newDeviceId = UUID().uuidString
-        if KeychainManager.shared.saveIdentityKey(newDeviceId.data(using: .utf8) ?? Data(), forKey: keychainKey) {
-            SecureLogger.log("Generated and stored new device identifier", 
-                           category: SecureLogger.security, level: .info)
-        } else {
-            SecureLogger.log("Failed to store device identifier in keychain", 
-                           category: SecureLogger.security, level: .warning)
-        }
-        
-        return newDeviceId
-    }
-    
     // MARK: - Range Optimization Methods
     
     
@@ -7223,82 +7192,6 @@ private func handleProtocolAck(from peerID: String, data: Data) {
             broadcastPacket(packet)
         }
     }
-    private func sendLoxationAnnounce(to specificPeerID: String? = nil) {
-        // Rate limit location announcements
-        let now = Date()
-        
-        // If targeting a specific peer, check rate limit
-        if let peerID = specificPeerID {
-            if let lastTime = lastIdentityAnnounceTimes[peerID],
-               now.timeIntervalSince(lastTime) < identityAnnounceMinInterval {
-                // Too soon, skip this announcement
-                return
-            }
-            lastIdentityAnnounceTimes[peerID] = now
-        } else {
-            // Broadcasting to all - check global rate limit
-            if let lastTime = lastIdentityAnnounceTimes["*broadcast*"],
-               now.timeIntervalSince(lastTime) < identityAnnounceMinInterval {
-                return
-            }
-            lastIdentityAnnounceTimes["*broadcast*"] = now
-        }
-        
-        // Get our Noise static public key and signing public key
-        let staticKey = noiseService.getStaticPublicKeyData()
-        let signingKey = noiseService.getSigningPublicKeyData()
-        
-        // Get nickname from delegate
-        let nickname = (delegate as? ChatViewModel)?.nickname ?? "Anonymous"
-        
-        // Get stable device identifier
-        let deviceId = getDeviceIdentifier()
-        
-        // Create the binding data to sign (peerID + deviceId + timestamp)
-        let timestampData = String(Int64(now.timeIntervalSince1970 * 1000)).data(using: .utf8)!
-        let bindingData = myPeerID.data(using: .utf8)! + deviceId.data(using: .utf8)! + timestampData
-        
-        // Sign the binding with our Ed25519 signing key
-        let signature = noiseService.signData(bindingData) ?? Data()
-        
-        // Create the identity announcement
-        let announcement = LoxationAnnouncement(
-            peerID: myPeerID,
-            deviceId: deviceId,
-            timestamp: now,
-            signature: signature
-        )
-        
-        // Encode the announcement
-        let announcementData = announcement.toBinaryData()
-        
-        let packet = BitchatPacket(
-            type: MessageType.loxationAnnounce.rawValue,
-            senderID: Data(hexString: myPeerID) ?? Data(),
-            recipientID: specificPeerID.flatMap { Data(hexString: $0) },  // Targeted or broadcast
-            timestamp: UInt64(Date().timeIntervalSince1970 * 1000),
-            payload: announcementData,
-            signature: nil,
-            ttl: adaptiveTTL        )
-        
-        if let targetPeer = specificPeerID {
-            SecureLogger.log("Sending targeted loxation announce to \(targetPeer)", 
-                           category: SecureLogger.noise, level: .info)
-            
-            // Try direct delivery for targeted announces
-            if !sendDirectToRecipient(packet, recipientPeerID: targetPeer) {
-                // Fall back to selective relay if direct delivery fails
-                SecureLogger.log("Recipient \(targetPeer) not directly connected for loxation announce, using relay", 
-                               category: SecureLogger.session, level: .info)
-                sendViaSelectiveRelay(packet, recipientPeerID: targetPeer)
-            }
-        } else {
-            SecureLogger.log("Broadcasting loxation announce to all peers", 
-                           category: SecureLogger.noise, level: .info)
-            broadcastPacket(packet)
-        }
-    }
-
     // Removed sendPacket method - all packets should use broadcastPacket to ensure mesh delivery
     
     // Send private message using Noise Protocol

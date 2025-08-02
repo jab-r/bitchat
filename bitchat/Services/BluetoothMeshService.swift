@@ -625,14 +625,7 @@ class BluetoothMeshService: NSObject {
     
     // Noise session state tracking for lazy handshakes
     private var noiseSessionStates: [String: LazyHandshakeState] = [:]
-    
-    // MARK: - Cover Traffic
-    
-    // Cover traffic for privacy
-    private var coverTrafficTimer: Timer?
-    private let coverTrafficPrefix = "☂DUMMY☂"  // Prefix to identify dummy messages after decryption
-    private var lastCoverTrafficTime = Date()
-    
+        
     // MARK: - Connection State
     
     // Connection state tracking
@@ -1659,7 +1652,6 @@ class BluetoothMeshService: NSObject {
         cleanup()
         scanDutyCycleTimer?.invalidate()
         batteryMonitorTimer?.invalidate()
-        coverTrafficTimer?.invalidate()
         bloomFilterResetTimer?.invalidate()
         aggregationTimer?.invalidate()
         cleanupTimer?.invalidate()
@@ -1802,14 +1794,6 @@ class BluetoothMeshService: NSObject {
         
         // Setup battery optimizer
         setupBatteryOptimizer()
-        
-        // Start cover traffic for privacy (disabled by default for now)
-        // TODO: Make this configurable in settings
-        let coverTrafficEnabled = true
-        if coverTrafficEnabled {
-            SecureLogger.log("Cover traffic enabled", category: SecureLogger.security, level: .info)
-            startCoverTraffic()
-        }
     }
     
     // MARK: - Message Sending
@@ -2868,7 +2852,7 @@ class BluetoothMeshService: NSObject {
     }
     
     
-    private func broadcastPacket(_ packet: BitchatPacket) {
+    func broadcastPacket(_ packet: BitchatPacket) {
         // CRITICAL CHECK: Never send unencrypted JSON
         if packet.type == MessageType.deliveryAck.rawValue {
             // Check if payload looks like JSON
@@ -3101,12 +3085,12 @@ class BluetoothMeshService: NSObject {
                 messageTypeName = "HANDSHAKE_REQUEST"
             case .loxationAnnounce:
                 messageTypeName = "LOXATION_ANNOUNCE"
-            case .keyPackageStart:
-                messageTypeName = "KEY_PACKAGE_START"
-            case .keyPackageContinue:
-                messageTypeName = "KEY_PACKAGE_CONTINUE"
-            case .keyPackageEnd:
-                messageTypeName = "KEY_PACKAGE_END"
+            case .loxationQuery:
+                messageTypeName = "LOXATION_QUERY"
+            case .loxationChunk:
+                messageTypeName = "LOXATION_CHUNK"
+            case .loxationComplete:
+                messageTypeName = "LOXATION_COMPLETE"
             default:
                 messageTypeName = "UNKNOWN(\(packet.type))"
             }
@@ -3311,11 +3295,6 @@ class BluetoothMeshService: NSObject {
                     
                     // Parse the message
                     if let message = BitchatMessage.fromBinaryPayload(decryptedPayload) {
-                        
-                        // Check if this is a dummy message for cover traffic
-                        if message.content.hasPrefix(self.coverTrafficPrefix) {
-                                return  // Silently discard dummy messages
-                        }
                         
                         // Check if this is a favorite/unfavorite notification
                         if message.content.hasPrefix("SYSTEM:FAVORITED") || message.content.hasPrefix("SYSTEM:UNFAVORITED") {
@@ -4394,7 +4373,9 @@ class BluetoothMeshService: NSObject {
             if !isPeerIDOurs(senderID) {
                 handleHandshakeRequest(from: senderID, data: packet.payload)
             }
-            
+        case .loxationAnnounce, .loxationQuery, .loxationChunk, .loxationComplete:
+            self.handleLoxationMessage(MessageType(rawValue: packet.type)!, packet: packet, from: peerID)
+            break 
         case .favorited:
             // Now handled as private messages with "SYSTEM:FAVORITED" content
             // See handleReceivedPacket for MESSAGE type handling
@@ -5438,7 +5419,7 @@ extension BluetoothMeshService: CBPeripheralManagerDelegate {
         case .message, .announce, .leave, .readReceipt, .deliveryStatusRequest,
              .fragmentStart, .fragmentContinue, .fragmentEnd,
              .noiseIdentityAnnounce, .noiseEncrypted, 
-             .loxationAnnounce, .keyPackageStart, .keyPackageContinue, .keyPackageEnd,
+             .loxationAnnounce, .loxationQuery, .loxationChunk, .loxationComplete,
              .protocolNack, 
              .favorited, .unfavorited, .none:
             return false
@@ -5762,87 +5743,7 @@ extension BluetoothMeshService: CBPeripheralManagerDelegate {
         SecureLogger.log("Rate limiter cleanup: tracking \(messageRateLimiter.count) chat peers, \(protocolMessageRateLimiter.count) protocol peers, \(totalMessageTimestamps.count) total messages", 
                        category: SecureLogger.session, level: .debug)
     }
-    
-    // MARK: - Cover Traffic
-    
-    private func startCoverTraffic() {
-        // Start cover traffic with random interval
-        scheduleCoverTraffic()
-    }
-    
-    private func scheduleCoverTraffic() {
-        // Random interval between 30-120 seconds
-        let interval = TimeInterval.random(in: 30...120)
-        
-        coverTrafficTimer?.invalidate()
-        coverTrafficTimer = Timer.scheduledTimer(withTimeInterval: interval, repeats: false) { [weak self] _ in
-            self?.sendDummyMessage()
-            self?.scheduleCoverTraffic() // Schedule next dummy message
-        }
-    }
-    
-    private func sendDummyMessage() {
-        // Only send dummy messages if we have connected peers with established sessions
-        let peersWithSessions = getAllConnectedPeerIDs().filter { peerID in
-            return noiseService.hasEstablishedSession(with: peerID)
-        }
-        
-        guard !peersWithSessions.isEmpty else { 
-            SecureLogger.log("Cover traffic: No peers with established sessions, skipping dummy message", 
-                           category: SecureLogger.security, level: .debug)
-            return 
-        }
-        
-        // Skip if battery is low
-        if currentBatteryLevel < 0.2 {
-            SecureLogger.log("Cover traffic: Battery low, skipping dummy message", 
-                           category: SecureLogger.security, level: .debug)
-            return
-        }
-        
-        // Pick a random peer with an established session to send to
-        guard let randomPeer = peersWithSessions.randomElement() else { return }
-        
-        // Generate random dummy content
-        let dummyContent = generateDummyContent()
-        
-        SecureLogger.log("Cover traffic: Sending dummy message to \(randomPeer)", 
-                       category: SecureLogger.security, level: .info)
-        
-        // Send as a private message so it's encrypted
-        let recipientNickname = collectionsQueue.sync {
-            return self.peerSessions[randomPeer]?.nickname ?? "unknown"
-        }
-        
-        sendPrivateMessage(dummyContent, to: randomPeer, recipientNickname: recipientNickname)
-    }
-    
-    private func generateDummyContent() -> String {
-        // Generate realistic-looking dummy messages
-        let templates = [
-            "hey",
-            "ok",
-            "got it",
-            "sure",
-            "sounds good",
-            "thanks",
-            "np",
-            "see you there",
-            "on my way",
-            "running late",
-            "be there soon",
-            "👍",
-            "✓",
-            "meeting at the usual spot",
-            "confirmed",
-            "roger that"
-        ]
-        
-        // Prefix with dummy marker (will be encrypted)
-        return coverTrafficPrefix + (templates.randomElement() ?? "ok")
-    }
-    
-    
+       
     private func updatePeerLastSeen(_ peerID: String) {
         peerLastSeenTimestamps.set(peerID, value: Date())
     }
@@ -6777,11 +6678,11 @@ extension BluetoothMeshService: CBPeripheralManagerDelegate {
     
     // MARK: - Protocol ACK/NACK Handling
     
-    private func handleProtocolAck(from peerID: String, data: Data) {
-        guard let ack = ProtocolAck.fromBinaryData(data) else {
-            SecureLogger.log("Failed to decode protocol ACK from \(peerID)", category: SecureLogger.session, level: .error)
-            return
-        }
+private func handleProtocolAck(from peerID: String, data: Data) {
+    guard let ack = ProtocolAck.fromBinaryData(data) else {
+        SecureLogger.log("Failed to decode protocol ACK from \(peerID)", category: SecureLogger.session, level: .error)
+        return
+    }
         
         SecureLogger.log("Received protocol ACK from \(peerID) for packet \(ack.originalPacketID), type: \(ack.packetType), ackID: \(ack.ackID)", 
                        category: SecureLogger.session, level: .debug)
@@ -7401,7 +7302,7 @@ extension BluetoothMeshService: CBPeripheralManagerDelegate {
     // Removed sendPacket method - all packets should use broadcastPacket to ensure mesh delivery
     
     // Send private message using Noise Protocol
-    private func sendPrivateMessageViaNoise(_ content: String, to recipientPeerID: String, recipientNickname: String, messageID: String? = nil) {
+    func sendPrivateMessageViaNoise(_ content: String, to recipientPeerID: String, recipientNickname: String, messageID: String? = nil) {
         SecureLogger.log("sendPrivateMessageViaNoise called - content: '\(content.prefix(50))...', to: \(recipientPeerID), messageID: \(messageID ?? "nil")", 
                        category: SecureLogger.noise, level: .info)
         
@@ -7578,7 +7479,7 @@ extension BluetoothMeshService: CBPeripheralManagerDelegate {
     
     // MARK: - Targeted Message Delivery
     
-    private func sendDirectToRecipient(_ packet: BitchatPacket, recipientPeerID: String) -> Bool {
+    func sendDirectToRecipient(_ packet: BitchatPacket, recipientPeerID: String) -> Bool {
         // Try to send directly to the recipient if they're connected
         if let peripheral = connectedPeripherals[recipientPeerID],
            let characteristic = peripheralCharacteristics[peripheral],
@@ -7640,7 +7541,7 @@ extension BluetoothMeshService: CBPeripheralManagerDelegate {
         return Array(candidates.shuffled().prefix(maxPeers))
     }
     
-    private func sendViaSelectiveRelay(_ packet: BitchatPacket, recipientPeerID: String) {
+    func sendViaSelectiveRelay(_ packet: BitchatPacket, recipientPeerID: String) {
         // Select best relay candidates
         let relayPeers = selectBestRelayPeers(excluding: recipientPeerID)
         

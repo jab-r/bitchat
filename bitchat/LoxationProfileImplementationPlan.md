@@ -82,11 +82,11 @@ Add to existing `MessageType` enum:
 ```swift
 enum MessageType: UInt8 {
     // ... existing types ...
-    case loxationAnnounce = 0x20      // Profile announcement
-    case loxationQuery = 0x21         // Request profile data
-    case loxationChunk = 0x22         // Profile chunk data
-    case loxationComplete = 0x23      // Transfer completion
-    case loxationUpdate = 0x24        // Field update notification
+    case loxationAnnounce = 0x40      // Profile announcement
+    case loxationQuery = 0x41         // Request profile data
+    case loxationChunk = 0x42         // Profile chunk data
+    case loxationComplete = 0x43      // Transfer completion
+    case loxationUpdate = 0x44        // Field update notification
 }
 ```
 
@@ -174,112 +174,261 @@ struct TransferProgress {
 ## 4. Implementation Phases
 
 ### Phase 1: Core Profile Support
-**Duration: 1-2 days**
+Status: COMPLETE
 
-1. **Create LoxationProfile struct**
-   - Add all required fields
-   - Implement Codable conformance with custom handling for [String: Any]
-   - Add computed properties for chunking
+1. Created LoxationProfile struct
+   - Fields present with Codable conformance using AnyCodable for [String: Any]-like storage
+   - Computed properties: serializedSize, needsChunking
+   - Basic validation/sanitization helpers
 
-2. **Implement LoxationProfileManager**
-   - Basic profile storage and retrieval
-   - Thread-safe operations with concurrent queues
-   - Profile validation and sanitization
+2. Implemented LoxationProfileManager
+   - In-memory storage and thread-safe access
+   - Validation on setProfile, diff-based field update detection
 
-3. **Add profile update notifications**
-   - Combine publishers for updates
-   - Event types for different changes
-   - Change detection logic
+3. Profile update notifications
+   - profileUpdates PassthroughSubject publishes ProfileUpdate events
 
-**Deliverables:**
+Deliverables implemented:
 - LoxationProfile.swift
 - LoxationProfileManager.swift
-- Unit tests for profile operations
+- Unit tests: pending
 
 ### Phase 2: Message Protocol
-**Duration: 2-3 days**
+Status: PARTIAL COMPLETE
 
-1. **Add message type handlers to BluetoothMeshService**
-   ```swift
-   private func handleLoxationAnnounce(_ packet: BitchatPacket, from peerID: String)
-   private func handleLoxationQuery(_ packet: BitchatPacket, from peerID: String) 
-   private func handleLoxationChunk(_ packet: BitchatPacket, from peerID: String)
-   private func handleLoxationComplete(_ packet: BitchatPacket, from peerID: String)
-   private func handleLoxationUpdate(_ packet: BitchatPacket, from peerID: String)
-   ```
+1. Message routing and handlers
+   - LoxationMeshServiceExtensions.swift provides:
+     handleLoxationMessage switch, handleLoxationAnnounce, handleLoxationQuery, handleLoxationData (compat for loxationChunk), handleLoxationComplete
+   - Required BluetoothMeshService integration: route .loxationAnnounce/.loxationQuery/.loxationChunk/.loxationComplete to handleLoxationMessage (owner to wire; core file too large to auto-edit)
 
-2. **Implement query system**
-   - Query message creation and validation
-   - Response generation based on query type
-   - Query routing and filtering for privacy
+2. Query system
+   - Query decode/validate implemented
+   - Response generation for deviceInfo, userProfile, keyPackage, uwbToken, fullProfile
+   - Privacy: deviceInfo may send clear; sensitive types attempt Noise encryption, otherwise fail gracefully
 
-3. **Add profile announcements**
-   - Automatic announcements on peer connect
-   - Triggered announcements on profile updates
-   - Rate limiting to prevent spam
+3. Profile announcements
+   - Announce decode supported; updating LoxationProfile via setProfile
+   - Rate limiting for announcements is handled by BluetoothMeshService core
 
-**Deliverables:**
-- Message handlers in BluetoothMeshService
-- Query/response system implementation
-- Profile announcement logic with rate limiting
+Deliverables implemented:
+- Message handlers in extension (core routing pending if not already wired)
+- Query/response logic in extension
+- Announcement handling
 
-### Phase 3: Chunked Transfer Protocol
-**Duration: 3-4 days**
+### Phase 3: Transfer Protocol (adapted to core fragmentation/ACKs)
+Status: COMPLETE under “protocol-ACK-only” approach
 
-1. **Implement chunking logic**
-   ```swift
-   func chunkProfile(_ profile: LoxationProfile, transferId: String) -> [LoxationChunk]
-   func reassembleChunks(_ chunks: [LoxationChunk]) throws -> LoxationProfile
-   func validateChunkIntegrity(_ chunk: LoxationChunk) -> Bool
-   ```
+Adaptation note: Instead of custom per-chunk protocol, rely on BitChat core fragmentation/reassembly and protocol ACK/backoff. Loxation uses a single logical envelope per transfer plus loxationComplete to mark end-of-transfer.
 
-2. **Add transfer state management**
-   - Track incoming/outgoing transfers with UUIDs
-   - Handle transfer timeouts and cleanup
-   - Implement retry logic with exponential backoff
+1. Chunking logic
+   - Reused BitChat core transport fragmentation; LoxationDataEnvelope wraps entire response as payload
+   - Integrity handled by core transport
 
-3. **Add progress monitoring**
-   - Transfer progress events via Combine
-   - Completion and error notifications
-   - Bandwidth usage tracking
+2. Transfer state management
+   - LoxationManagers tracks logical incoming/outgoing transfers (id, startTime, peer, queryType)
+   - Timeout scanner runs every 2s; emits error progress and cleans state on exceed maxTransferTime
 
-4. **Implement flow control**
-   - Concurrent transfer limits per peer
-   - Priority queuing for different query types
-   - Memory management for large transfers
+3. Progress monitoring
+   - transferProgress PassthroughSubject publishes start (beginOutgoing), data-applied (applyLoxationData), completion (completeIncoming), and error/timeout
+   - Bandwidth metrics at logical level via known envelope data length (coarse-grained)
 
-**Deliverables:**
-- Chunking/reassembly system with integrity checks
-- Transfer state management with timeout handling
-- Progress monitoring and flow control
+4. Flow control
+   - Soft concurrency placeholders in LoxationManagers; minimal enforcement without core send path changes
+   - Pacing and per-peer priority queues can be added later if deeper integration is allowed
+
+Deliverables implemented:
+- Logical transfer state with timeout handling
+- Progress monitoring via Combine
+- Envelope-based flow leveraging core fragmentation/ACKs
+
+Known limits (by design without core edits):
+- No per-chunk ACK mapping or explicit chunk retries wired to Loxation; rely on transport-level retries/backoff
+- Flow control is basic (soft caps). Full scheduler would require hooks in BluetoothMeshService
 
 ### Phase 4: BluetoothMeshService Integration
+Status: PARTIAL (owner action required)
+
+1. Packet handlers integration
+   - Required: In BluetoothMeshService.handleReceivedPacket, add routing to extension:
+     case .loxationAnnounce, .loxationQuery, .loxationChunk, .loxationComplete:
+       self.handleLoxationMessage(messageType, packet: packet, from: peerID)
+    **COMPLETED**
+
+2. Noise encryption integration
+   - Implemented in extension: sensitive responses attempt Noise encryption when a session exists
+
+3. Broadcasting support
+   - Extension uses broadcastPacket via loxationBroadcast shim for compatibility when targeted helpers are private
+
+4. Caching/memory management
+   - Profile caching is in LoxationProfileManager; advanced memory management can be added later
+
+Deliverables pending:
+- Ensure core routing to extension exists in BluetoothMeshService
+
+### Phase 5: External Integrations
+Status: NOT STARTED
+
+1. UWB Token Integration
+   - Protocol scaffold present; iOS service integration TBD
+
+2. MLS Key Package Integration
+   - To be integrated with MLSEncryptionService
+
+3. Device ID Management
+   - Stable deviceId currently taken from announce and sanitized; full lifecycle TBD
+
+Deliverables pending:
+- UWB hooks, MLS lifecycle, device ID management
+
+## 6. Security Considerations
+Status: IN PROGRESS
+
+- Sensitive fields encryption preferred; fall back policy is “do not send” without Noise session
+- Validation on incoming data; timeouts to avoid hanging transfers
+- Rate limiting for announcements handled by core; further loxation-specific rate limiting TBD
+
+## 7. Future Extensions
+(no change)
+
+## 8. Success Metrics
+Status: PARTIAL
+
+- Transmission success: relies on core transport; Loxation progress reports added
+- Completion time: timeout is 30s; performance tuning TBD
+- Memory usage: minimal footprint; advanced caps pending
+- Zero data corruption: depends on core integrity; envelope decode guarded
+- Cross-platform: maintained via envelope + core transport
+
+### Phase 4: BluetoothMeshService Integration (Revised to leverage core fragmentation and existing reliability)
 **Duration: 2-3 days**
 
-1. **Add packet handlers**
-   - Integration with existing message dispatch in `handleReceivedPacket`
-   - Add Loxation message types to switch statement
-   - Proper error handling and logging
+Context
+- Phase 3 now relies on BitChat’s built-in fragmentation/reassembly and transport reliability instead of custom LoxationChunk sequencing. Loxation uses a single logical “data envelope” plus loxationComplete to signal end-of-transfer, with minimal logical state and Combine progress events.
 
-2. **Integrate with Noise encryption**
-   - Encrypt sensitive profile data (keyPackage, userProfile)
-   - Handle encrypted chunk transmission
-   - Key exchange management for profile access
+Goals
+1. Tight integration with BluetoothMeshService dispatch
+   - Ensure `handleReceivedPacket` routes loxation types: `.loxationAnnounce`, `.loxationQuery`, `.loxationChunk` (compat data), `.loxationComplete` to `handleLoxationMessage`.
+   - Confirm correct BitchatPacket construction (senderID/recipientID/timestamp/ttl) and targeted vs broadcast paths use existing primitives (sendDirectToRecipient, sendViaSelectiveRelay, broadcastPacket) as appropriate.
+   - Standardize logging via SecureLogger categories and ensure errors/warnings are deduplicated by existing rate-limiting.
 
-3. **Add broadcasting support**
-   - Profile announcements to all connected peers
-   - Selective profile sharing based on privacy settings
-   - Efficient broadcast mechanisms
+2. Noise encryption policy for profile data
+   - Define field-level policy:
+     • Encrypted by default: keyPackage, userProfile.
+     • Optional/clear: deviceId, locationId for announce/deviceInfo; uwbToken is NOT sensitive and can be sent clear.
+   - Implement conditional encryption using existing NoiseEncryptionService:
+     • For responses that require confidentiality (keyPackage, userProfile), wrap payload in Noise before packaging into BitchatPacket (i.e., use MessageType.noiseEncrypted inner flow when targeted).
+     • For broadcast announcements (loxationAnnounce), keep clear minimal info; avoid large encrypted broadcasts.
+   - Clarify access policy: targeted queries should be preferred for sensitive fields to leverage direct delivery + Noise.
 
-4. **Implement caching and memory management**
-   - In-memory profile caching with LRU eviction
-   - Cache invalidation on profile updates
-   - Memory pressure handling
+3. Announcement and query orchestration
+   - Announcements:
+     • Trigger loxationAnnounce on peer connect and upon local profile updates with rate limiting (reuse existing dedupe/rate-control).
+     • Keep payload minimal (deviceId + optional hints), avoid large broadcasts.
+   - Query flows:
+     • Introduce simple policy to auto-query userProfile or keyPackage upon first contact or when profile is stale.
+     • Ensure each query uses the simplified transfer model: single data envelope + loxationComplete; rely on core fragmentation.
 
-**Deliverables:**
-- Full BluetoothMeshService integration
-- Noise encryption support for sensitive data
-- Broadcasting and caching with memory management
+4. Progress and timeout surfacing
+   - Wire LoxationManagers.shared.transferProgress to UI/ViewModel (subscription point), log progress steps (start/complete/error).
+   - On timeout or decode errors, emit TransferProgress with error; ensure cleanup is idempotent.
+
+5. Flow control alignment with core backpressure
+   - Respect existing transport backpressure/rate limits; avoid sending bursts of loxation messages.
+   - Soft cap concurrent logical transfers (maxConcurrentTransfers). For heavier usage, add a simple FIFO per-peer queue that starts when a slot frees.
+   - Keep memory footprint bounded; rely on transport and existing BitChat memory pressure mechanisms.
+
+6. Caching, invalidation, and memory
+   - Maintain in-memory profile cache via LoxationProfileManager.
+   - Invalidate/update cache on ProfileUpdate events.
+   - Avoid duplicating large data blobs in multiple places; store only final profile state.
+
+7. Telemetry and diagnostics
+   - Add lightweight counters/metrics:
+     • loxation queries sent/received by type
+     • average logical transfer duration
+     • timeout/error counts
+   - Gate logs via SecureLogger levels to avoid noise.
+
+Implementation checklist
+- BluetoothMeshService:
+  [ ] Ensure switch routing calls handleLoxationMessage for all loxation types
+  [ ] Confirm BitchatPacket construction paths for targeted vs broadcast loxation messages
+  [ ] Rate-limit announcements (reuse identity announce cadence)
+  [ ] Prefer targeted, Noise-encrypted responses for sensitive fields
+- LoxationMeshServiceExtensions:
+  [ ] Keep data envelope path for loxationChunk compatibility and immediate apply
+  [ ] Ensure loxationComplete always sent after data envelope on query responses
+  [ ] Emit progress via LoxationManagers transferProgress at start/complete/error
+- LoxationManagers:
+  [ ] Keep minimal state + timeout scan (already implemented)
+  [ ] Optionally add per-peer soft concurrency queue if needed by usage patterns
+- UI/ViewModel:
+  [ ] Subscribe to transferProgress for user-visible status (optional for Phase 4)
+  [ ] Display minimal status for long transfers or errors
+
+Deliverables
+- Fully wired loxation handlers into BluetoothMeshService dispatch
+- Field-level encryption policy applied using Noise for sensitive data on targeted queries
+- Announcement + query orchestration with rate limiting
+- Progress surfaced via Combine and bounded by timeouts
+- Documentation updates to reflect simplified transport model and policies
+
+Status update (continued)
+- Verified that BluetoothMeshService.handleReceivedPacket routes .loxationAnnounce/.loxationQuery/.loxationChunk/.loxationComplete to handleLoxationMessage in LoxationMeshServiceExtensions.swift.
+- Confirmed sendLoxationAnnounce(to:) is implemented in BluetoothMeshService with deduping via lastIdentityAnnounceTimes and identityAnnounceMinInterval.
+- Confirmed use of broadcastPacket, sendDirectToRecipient, and sendViaSelectiveRelay are available to satisfy targeted vs broadcast delivery requirements.
+- Noise encryption policy alignment: Targeted responses for sensitive fields should be encrypted and wrapped in MessageType.noiseEncrypted, leveraging NoiseEncryptionService present as noiseService.
+
+Next tasks to complete Phase 4
+1) LoxationMeshServiceExtensions
+   - Ensure handleLoxationMessage implements:
+     a) loxationAnnounce: decode and setProfile via LoxationProfileManager, minimal payload only.
+     b) loxationQuery: policy-gated responses; for sensitive fields (userProfile), attempt Noise encryption if noiseService.hasEstablishedSession(with: requesterID), else skip sending.
+     c) loxationChunk compatibility path: treat as envelope data per Phase 3; immediately apply to manager and emit progress.
+     d) loxationComplete: finalize logical transfer and emit completion.
+   - Always send loxationComplete after any single-envelope data response.
+
+2) BluetoothMeshService glue points
+   - After version negotiation and identity flows, on initial peer contact, schedule lightweight auto-query orchestration:
+     • Prefer deviceInfo via broadcast or direct only if profile is unknown.
+     • For sensitive fields (userProfile/keyPackage), schedule targeted queries only if Noise session is established; otherwise defer until after handshake.
+   - Rate-limit loxationAnnounce alongside identity announcements. Existing sendLoxationAnnounce satisfies this; add call sites:
+     • On rotatePeerID(): already calls sendLoxationAnnounce().
+     • On startServices(): optionally send initial loxationAnnounce after general announce (can be gated by dedupe).
+     • On local profile update event: subscribe to LoxationProfileManager.profileUpdates and post minimal loxationAnnounce.
+
+3) Progress/timeout surfacing
+   - Expose LoxationProfileManager.shared.transferProgress to ChatViewModel subscription point for optional UI display.
+   - Log progress at SecureLogger.session level with throttling.
+
+4) Flow control alignment
+   - Respect existing backpressure via send* helpers and aggregation.
+   - Enforce maxConcurrentTransfers in LoxationProfileManager; queuing is optional for Phase 4.
+
+5) Telemetry hooks
+   - Increment counters for queries sent/received and transfer durations in extension; gate logs.
+
+Acceptance criteria
+- Receiving loxationAnnounce updates local profile cache without crashes; de-duplicated by manager.
+- Responding to loxationQuery sends a single logical envelope plus loxationComplete; for sensitive fields, response is sent only when Noise session is established.
+- handleReceivedPacket switch continues to route all loxation message types to the extension.
+- No regressions to ACK/fragmentation paths; large profile payloads travel using core fragmentation.
+- Logs show progress start/complete and timeouts within LoxationProfileManager as transfers occur.
+
+Test plan
+- Unit: Validate manager setProfile diff and update events; needsChunking threshold; timeout scanner emits error.
+- Integration: Simulate:
+  • loxationAnnounce ingest path.
+  • loxationQuery for deviceInfo (clear) succeeds.
+  • loxationQuery for userProfile without Noise is withheld; with Noise session established, succeeds and emits loxationComplete.
+  • Large userProfile triggers fragmentation and still completes.
+- E2E: Two peers exchange announcements; auto-query runs; UI subscribes to progress optionally.
+
+Notes
+- Do not send large encrypted broadcasts. Keep loxationAnnounce minimal.
+- Prefer targeted delivery for sensitive data leveraging Noise.
+- Defer complex scheduling/backpressure to core; only minimal logical caps within LoxationProfileManager.
 
 ### Phase 5: External Integrations
 **Duration: 2-3 days**
@@ -298,6 +447,7 @@ struct TransferProgress {
    - Integration with existing MLSEncryptionService
    - Automatic key package generation and updates
    - Key package validation and lifecycle management
+   - Treat keyPackages with the same sensitivity and exposure policy as public keys (not confidential data), but still validate format and integrity before distribution
 
 3. **Device ID Management**
    - Stable device identifier generation and persistence

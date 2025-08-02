@@ -167,9 +167,9 @@ enum MessageType: UInt8 {
     case unfavorited = 0x31             // Peer unfavorited us
     // loxation messages
     case loxationAnnounce = 0x40        // Device ID announcement for location sharing
-    case keyPackageStart = 0x41         // Key package for MLS group management
-    case keyPackageContinue = 0x42      // Continuation of key package transmission
-    case keyPackageEnd = 0x43           // End of key package transmission
+    case loxationQuery = 0x41           // Request profile data (by LoxationQueryType)
+    case loxationChunk = 0x42           // Chunked response payloads for large data
+    case loxationComplete = 0x43        // Marks completion of a transferId
 
     var description: String {
         switch self {
@@ -195,9 +195,9 @@ enum MessageType: UInt8 {
         case .favorited: return "favorited"
         case .unfavorited: return "unfavorited"
         case .loxationAnnounce: return "loxationAnnounce"
-        case .keyPackageStart: return "keyPackageStart"
-        case .keyPackageContinue: return "keyPackageContinue"
-        case .keyPackageEnd: return "keyPackageEnd"
+        case .loxationQuery: return "loxationQuery"
+        case .loxationChunk: return "loxationChunk"
+        case .loxationComplete: return "loxationComplete"
         }
     }
 }
@@ -831,6 +831,53 @@ struct NoiseIdentityAnnouncement: Codable {
         data.appendData(signature)
         
         return data
+    }
+    
+    static func fromBinaryData(_ data: Data) -> NoiseIdentityAnnouncement? {
+        // Create defensive copy
+        let dataCopy = Data(data)
+        
+        // Minimum size check: flags(1) + peerID(8) + min data lengths
+        guard dataCopy.count >= 20 else { return nil }
+        
+        var offset = 0
+        
+        guard let flags = dataCopy.readUInt8(at: &offset) else { return nil }
+        let hasPreviousPeerID = (flags & 0x01) != 0
+        
+        // Read peerID using safe method
+        guard let peerIDBytes = dataCopy.readFixedBytes(at: &offset, count: 8) else { return nil }
+        let peerID = peerIDBytes.hexEncodedString()
+        guard InputValidator.validatePeerID(peerID) else { return nil }
+        
+        guard let publicKey = dataCopy.readData(at: &offset),
+              InputValidator.validatePublicKey(publicKey),
+              let signingPublicKey = dataCopy.readData(at: &offset),
+              InputValidator.validatePublicKey(signingPublicKey),
+              let rawNickname = dataCopy.readString(at: &offset),
+              let nickname = InputValidator.validateNickname(rawNickname),
+              let timestamp = dataCopy.readDate(at: &offset),
+              InputValidator.validateTimestamp(timestamp) else { return nil }
+        
+        var previousPeerID: String? = nil
+        if hasPreviousPeerID {
+            // Read previousPeerID using safe method
+            guard let prevIDBytes = dataCopy.readFixedBytes(at: &offset, count: 8) else { return nil }
+            let prevID = prevIDBytes.hexEncodedString()
+            guard InputValidator.validatePeerID(prevID) else { return nil }
+            previousPeerID = prevID
+        }
+        
+        guard let signature = dataCopy.readData(at: &offset),
+              InputValidator.validateSignature(signature) else { return nil }
+        
+        return NoiseIdentityAnnouncement(peerID: peerID,
+                                        publicKey: publicKey,
+                                        signingPublicKey: signingPublicKey,
+                                        nickname: nickname,
+                                        timestamp: timestamp,
+                                        previousPeerID: previousPeerID,
+                                        signature: signature)
     }
 }
 struct LoxationAnnouncement: Codable {

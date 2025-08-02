@@ -5373,6 +5373,44 @@ extension BluetoothMeshService: CBPeripheralManagerDelegate {
         return TimeInterval.random(in: minMessageDelay...maxMessageDelay)
     }
     
+    // MARK: - Device Identification
+    
+    /// Gets a stable device identifier that persists across app launches
+    /// On iOS: Uses UIDevice.identifierForVendor with keychain fallback
+    /// On macOS: Generates and stores a UUID in keychain
+    private func getDeviceIdentifier() -> String {
+        let keychainKey = "deviceIdentifier"
+        
+        #if os(iOS)
+        // On iOS, prefer UIDevice.identifierForVendor
+        if let vendorId = UIDevice.current.identifierForVendor?.uuidString {
+            // Store in keychain for consistency and fallback
+            _ = KeychainManager.shared.saveIdentityKey(vendorId.data(using: .utf8) ?? Data(), forKey: keychainKey)
+            return vendorId
+        }
+        #endif
+        
+        // Try to retrieve existing device ID from keychain
+        if let existingData = KeychainManager.shared.getIdentityKey(forKey: keychainKey),
+           let existingId = String(data: existingData, encoding: .utf8) {
+            SecureLogger.log("Retrieved existing device identifier from keychain", 
+                           category: SecureLogger.security, level: .info)
+            return existingId
+        }
+        
+        // Generate new device ID and store in keychain
+        let newDeviceId = UUID().uuidString
+        if KeychainManager.shared.saveIdentityKey(newDeviceId.data(using: .utf8) ?? Data(), forKey: keychainKey) {
+            SecureLogger.log("Generated and stored new device identifier", 
+                           category: SecureLogger.security, level: .info)
+        } else {
+            SecureLogger.log("Failed to store device identifier in keychain", 
+                           category: SecureLogger.security, level: .warning)
+        }
+        
+        return newDeviceId
+    }
+    
     // MARK: - Range Optimization Methods
     
     
@@ -5399,7 +5437,9 @@ extension BluetoothMeshService: CBPeripheralManagerDelegate {
             return true
         case .message, .announce, .leave, .readReceipt, .deliveryStatusRequest,
              .fragmentStart, .fragmentContinue, .fragmentEnd,
-             .noiseIdentityAnnounce, .noiseEncrypted, .protocolNack, 
+             .noiseIdentityAnnounce, .noiseEncrypted, 
+             .loxationAnnounce, .keyPackageStart, .keyPackageContinue, .keyPackageEnd,
+             .protocolNack, 
              .favorited, .unfavorited, .none:
             return false
         }
